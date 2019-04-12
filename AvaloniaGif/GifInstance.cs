@@ -24,10 +24,10 @@ namespace AvaloniaGif
         private GifDecoder _gifDecoder;
         private GifBackgroundWorker _bgWorker;
         private WriteableBitmap _targetBitmap;
-        private bool _hasNewFrame;
+        private volatile bool _hasNewFrame;
         private bool _isDisposed;
+        private IDisposable _clock;
         private readonly object _bitmapSync = new object();
-        private static readonly object _globalUIThreadUpdateLock = new object();
 
         public void SetSource(object newValue)
         {
@@ -57,6 +57,9 @@ namespace AvaloniaGif
                 throw new InvalidDataException("Missing valid URI or Stream.");
             }
 
+            if (!stream.CanSeek)
+                throw new ArgumentException("The stream is not seekable");
+
             Stream = stream;
             this._gifDecoder = new GifDecoder(Stream);
             this._bgWorker = new GifBackgroundWorker(_gifDecoder);
@@ -64,7 +67,6 @@ namespace AvaloniaGif
             this._targetBitmap = new WriteableBitmap(pixSize, new Vector(96, 96), PixelFormat.Bgra8888);
 
             TargetControl.Source = _targetBitmap;
-            //TargetControl.DetachedFromVisualTree += delegate { this.Dispose(); };
             _bgWorker.CurrentFrameChanged += FrameChanged;
 
             Run();
@@ -73,19 +75,19 @@ namespace AvaloniaGif
         private void RenderTick(TimeSpan time)
         {
             if (_isDisposed | !_hasNewFrame) return;
-            lock (_globalUIThreadUpdateLock)
-                lock (_bitmapSync)
-                {
-                    TargetControl?.InvalidateVisual();
-                    _hasNewFrame = false;
-                }
+
+            lock (_bitmapSync)
+            {
+                TargetControl?.InvalidateVisual();
+                _hasNewFrame = false;
+            }
         }
 
         private void FrameChanged()
         {
+            if (_isDisposed) return;
             lock (_bitmapSync)
             {
-                if (_isDisposed) return;
                 _hasNewFrame = true;
                 using (var lockedBitmap = _targetBitmap?.Lock())
                     _gifDecoder?.WriteBackBufToFb(lockedBitmap.Address);
@@ -94,10 +96,7 @@ namespace AvaloniaGif
 
         private void Run()
         {
-            if (!Stream.CanSeek)
-                throw new ArgumentException("The stream is not seekable");
-
-            AvaloniaLocator.Current.GetService<IRenderTimer>().Tick += RenderTick;
+            this._clock = (new Clock()).Subscribe(o => RenderTick(o));
             this._bgWorker?.SendCommand(BgWorkerCommand.Play);
         }
 
@@ -116,8 +115,8 @@ namespace AvaloniaGif
         public void Dispose()
         {
             _isDisposed = true;
-            AvaloniaLocator.Current.GetService<IRenderTimer>().Tick -= RenderTick;
-            this._bgWorker?.SendCommand(BgWorkerCommand.Dispose);
+            _clock?.Dispose();
+            _bgWorker?.SendCommand(BgWorkerCommand.Dispose);
             _targetBitmap?.Dispose();
         }
     }
